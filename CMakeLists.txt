@@ -38,9 +38,9 @@ FetchContent_MakeAvailable(nlohmann_json)
 set(INVENTORYUI_BUILD_AS_STATIC ON)
 FetchContent_Declare(
         endstone_inventoryui
-        #GIT_REPOSITORY https://github.com/yuhangle/endstone-inventoryui-api.git
-        #GIT_TAG main
-        SOURCE_DIR /home/yuhang/Documents/item/endstone-c/endstone-inventoryui
+        GIT_REPOSITORY https://github.com/yuhangle/endstone-inventoryui-api.git
+        GIT_TAG main
+        #SOURCE_DIR /home/yuhang/Documents/item/endstone-c/endstone-inventoryui
 )
 FetchContent_MakeAvailable(endstone_inventoryui)
 
