@@ -1,0 +1,4 @@
+.idea
+Releases/*
+cmake-build-relwithdebinfo/*
+build/*
