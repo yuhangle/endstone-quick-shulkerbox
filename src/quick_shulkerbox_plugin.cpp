@@ -196,7 +196,7 @@ void QuickShulkerboxPlugin::onPlayerInteract(const endstone::PlayerInteractEvent
 
     // 注册玩家物品栏点击监听 — 将物品放入潜影盒
     menu->set_player_inventory_listener(
-        [menu](endstone::Player &player, int, const endstone::ItemStack &item1,
+        [menu](endstone::Player &player, int slot, const endstone::ItemStack &item1,
                int) -> std::function<void()> {
             if (item1.getType() == endstone::ItemType::Air)
                 return {};
@@ -244,52 +244,122 @@ void QuickShulkerboxPlugin::onPlayerInteract(const endstone::PlayerInteractEvent
             if (nbt2.contains("Items") && nbt2.at("Items").type() == endstone::nbt::Type::List)
                 itemsList = nbt2.at("Items").get<endstone::ListTag>();
 
-            // 检查是否已满 (27 格)
-            if (itemsList.size() >= 27)
-            {
-                return {};
-            }
-
-            // 查找潜影盒内的第一个空槽位 (0-26)
-            int emptySlot = 0;
+            // 查找潜影盒中是否有同类物品可堆叠，或找第一个空槽位
+            const int maxStack = item1.getType().getMaxStackSize();
+            int targetSlot = -1;
+            bool stacked = false;
             {
                 std::vector used(27, false);
                 for (const auto & e : itemsList)
                 {
                     if (e.type() != endstone::nbt::Type::Compound) continue;
-                    if (const auto &c = e.get<endstone::CompoundTag>(); c.contains("Slot") && c.at("Slot").type() == endstone::nbt::Type::Byte)
+                    const auto &c = e.get<endstone::CompoundTag>();
+
+                    int s = -1;
+                    if (c.contains("Slot") && c.at("Slot").type() == endstone::nbt::Type::Byte)
+                        s = c.at("Slot").get<endstone::ByteTag>().value();
+                    if (s < 0 || s >= 27) continue;
+                    used[s] = true;
+
+                    // 找到同类物品且未满最大堆叠数，优先堆叠
+                    std::string name;
+                    if (c.contains("Name") && c.at("Name").type() == endstone::nbt::Type::String)
+                        name = c.at("Name").get<endstone::StringTag>().value();
+                    int count = 0;
+                    if (c.contains("Count") && c.at("Count").type() == endstone::nbt::Type::Byte)
+                        count = c.at("Count").get<endstone::ByteTag>().value();
+
+                    if (name == clickedId && count > 0 && count < maxStack && targetSlot == -1)
                     {
-                        if (int s = c.at("Slot").get<endstone::ByteTag>().value(); s >= 0 && s < 27) used[s] = true;
+                        targetSlot = s;
+                        stacked = true;
                     }
                 }
-                for (int i = 0; i < 27; ++i)
+
+                // 没有可堆叠的同类物品，找第一个空槽
+                if (targetSlot == -1)
                 {
-                    if (!used[i]) { emptySlot = i; break; }
+                    for (int i = 0; i < 27; ++i)
+                    {
+                        if (!used[i]) { targetSlot = i; break; }
+                    }
                 }
             }
 
-            // 构造新条目
-            endstone::CompoundTag entry;
-            entry.insert_or_assign("Slot", endstone::ByteTag(static_cast<std::uint8_t>(emptySlot)));
-            entry.insert_or_assign("Name", endstone::StringTag(clickedId));
-            entry.insert_or_assign("Count", endstone::ByteTag(static_cast<std::uint8_t>(item1.getAmount())));
+            // 潜影盒已满（无空槽且无可堆叠槽位）
+            if (targetSlot == -1)
+                return {};
 
-            // 复制物品NBT
-            if (const auto itemNbt = item1.getNbt(); !itemNbt.empty())
-                entry.insert_or_assign("tag", itemNbt);
+            // 构建新的 Items 列表，并计算实际放入数量
+            int addedAmount = item1.getAmount();
+            endstone::ListTag newItemsList;
+            for (const auto &e : itemsList)
+            {
+                if (stacked && e.type() == endstone::nbt::Type::Compound)
+                {
+                    auto comp = e.get<endstone::CompoundTag>();
+                    int s = -1;
+                    if (comp.contains("Slot") && comp.at("Slot").type() == endstone::nbt::Type::Byte)
+                        s = comp.at("Slot").get<endstone::ByteTag>().value();
 
-            // 追加到列表并写回
-            nbt2.insert_or_assign("Items", listTagAppend(itemsList, endstone::nbt::Tag(entry)));
+                    if (s == targetSlot)
+                    {
+                        // 堆叠：计算实际可放入数量
+                        int oldCount = 1;
+                        if (comp.contains("Count") && comp.at("Count").type() == endstone::nbt::Type::Byte)
+                            oldCount = comp.at("Count").get<endstone::ByteTag>().value();
+                        int space = maxStack - oldCount;
+                        addedAmount = std::min(item1.getAmount(), space);
+                        int newCount = oldCount + addedAmount;
+                        comp.insert_or_assign("Count", endstone::ByteTag(static_cast<std::uint8_t>(newCount)));
+                        newItemsList.emplace_back(endstone::nbt::Tag(comp));
+
+                        // 更新 UI 中该槽位的显示
+                        endstone::ItemStack updatedStack(clickedId, newCount);
+                        if (comp.contains("tag") && comp.at("tag").type() == endstone::nbt::Type::Compound)
+                            updatedStack.setNbt(comp.at("tag").get<endstone::CompoundTag>());
+                        menu->get_inventory()->set_item(targetSlot, updatedStack);
+                        continue;
+                    }
+                }
+                newItemsList.emplace_back(e);
+            }
+
+            if (!stacked)
+            {
+                // 新增条目
+                endstone::CompoundTag entry;
+                entry.insert_or_assign("Slot", endstone::ByteTag(static_cast<std::uint8_t>(targetSlot)));
+                entry.insert_or_assign("Name", endstone::StringTag(clickedId));
+                entry.insert_or_assign("Count", endstone::ByteTag(static_cast<std::uint8_t>(item1.getAmount())));
+                if (const auto itemNbt = item1.getNbt(); !itemNbt.empty())
+                    entry.insert_or_assign("tag", itemNbt);
+                newItemsList = listTagAppend(newItemsList, endstone::nbt::Tag(entry));
+
+                // 更新虚拟容器显示
+                menu->get_inventory()->set_item(targetSlot, item1);
+            }
 
             // 写回潜影盒
+            nbt2.insert_or_assign("Items", newItemsList);
             shulkerItem.setNbt(nbt2);
             playerInv.setItem(shulkerSlot, shulkerItem);
 
-            // 从玩家背包移除该物品
-            playerInv.removeItem(item1);
-
-            // 更新虚拟容器显示
-            menu->get_inventory()->set_item(emptySlot, item1);
+            // 从玩家背包移除已放入的数量
+            if (addedAmount >= item1.getAmount())
+            {
+                // 全部放入，清除槽位
+                playerInv.setItem(slot, std::nullopt);
+            }
+            else
+            {
+                // 部分放入，减少数量
+                int remaining = item1.getAmount() - addedAmount;
+                endstone::ItemStack remainingStack(clickedId, remaining);
+                if (const auto itemNbt = item1.getNbt(); !itemNbt.empty())
+                    remainingStack.setNbt(itemNbt);
+                playerInv.setItem(slot, remainingStack);
+            }
 
             // 刷新潜影盒 UI
             menu->refresh_contents(player);
