@@ -76,6 +76,15 @@ void QuickShulkerboxPlugin::onPlayerInteract(const endstone::PlayerInteractEvent
         return;
 
     const auto nbt = item.getNbt();
+
+    if (nbt.contains("minecraft:item_lock"))
+    {
+        if (!event.getPlayer().isOp())
+        {
+            return;
+        }
+    }
+
     if (!nbt.contains("Items") || nbt.at("Items").type() != endstone::nbt::Type::List)
         return;
 
@@ -83,7 +92,9 @@ void QuickShulkerboxPlugin::onPlayerInteract(const endstone::PlayerInteractEvent
     if (items_list.empty())
         return;
 
-    std::string menu_title = event.getPlayer().getServer().getLanguage().translate(item.getType().getTranslationKey());
+    auto& server_ = event.getPlayer().getServer();
+
+    std::string menu_title = server_.getLanguage().translate(item.getType().getTranslationKey());
 
     if (auto meta = item.getItemMeta())
     {
@@ -147,6 +158,7 @@ void QuickShulkerboxPlugin::onPlayerInteract(const endstone::PlayerInteractEvent
 
             // 从玩家主手潜影盒的 NBT 中移除该物品
             const int heldSlot = playerInv.getHeldItemSlot();
+
             if (auto shulkerItem = playerInv.getItem(heldSlot); shulkerItem.has_value())
             {
                 if (auto nbt1 = shulkerItem->getNbt(); nbt1.contains("Items") && nbt1.at("Items").type() == endstone::nbt::Type::List)
@@ -178,11 +190,17 @@ void QuickShulkerboxPlugin::onPlayerInteract(const endstone::PlayerInteractEvent
                         newList.emplace_back(entry);
                     }
 
-                    if (newList.empty())
-                        nbt1.erase("Items");
-                    else
-                        nbt1.insert_or_assign("Items", newList);
+                    // 使用空列表而非删除键
+                    nbt1.insert_or_assign("Items", newList);
 
+                    if (nbt1.contains("minecraft:item_lock"))
+                    {
+                        // 移除锁定标签以允许 NBT 修改
+                        nbt1.erase("minecraft:item_lock");
+                    }
+
+
+                    // 设置修改后的 NBT
                     shulkerItem->setNbt(nbt1);
                     playerInv.setItem(heldSlot, shulkerItem);
                 }
@@ -342,6 +360,14 @@ void QuickShulkerboxPlugin::onPlayerInteract(const endstone::PlayerInteractEvent
 
             // 写回潜影盒
             nbt2.insert_or_assign("Items", newItemsList);
+
+            if (nbt2.contains("minecraft:item_lock"))
+            {
+                // 移除锁定标签以允许 NBT 修改
+                nbt2.erase("minecraft:item_lock");
+            }
+
+            // 设置修改后的 NBT
             shulkerItem.setNbt(nbt2);
             playerInv.setItem(shulkerSlot, shulkerItem);
 
