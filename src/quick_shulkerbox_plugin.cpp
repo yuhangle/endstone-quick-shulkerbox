@@ -49,6 +49,8 @@ static bool compoundTagEqual(const endstone::CompoundTag &a, const endstone::Com
 ENDSTONE_PLUGIN("quick_shulkerbox", PLUGIN_VERSION, QuickShulkerboxPlugin)
 {
     description = "Quick Shulkerbox plugin for Endstone servers";
+    authors = {"yuhangle","yuhang2006@hotmail.com"};
+    website = "https://github.com/yuhangle/endstone-quick-shulkerbox";
 }
 
 void QuickShulkerboxPlugin::onLoad()
