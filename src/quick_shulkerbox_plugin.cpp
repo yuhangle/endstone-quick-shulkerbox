@@ -9,14 +9,24 @@
 #include <chrono>
 #include <unordered_map>
 
-// 辅助：向 ListTag 追加元素，返回新 ListTag
-static endstone::ListTag listTagAppend(const endstone::ListTag &src, const endstone::nbt::Tag &value)
+// 辅助：在玩家背包中查找潜影盒，优先主手，返回槽位索引；未找到返回 -1
+static int findShulkerBox(const endstone::PlayerInventory &inv)
 {
-    endstone::ListTag result;
-    for (const auto & i : src)
-        result.emplace_back(i);
-    result.emplace_back(value);
-    return result;
+    const int heldSlot = inv.getHeldItemSlot();
+    if (const auto held = inv.getItem(heldSlot); held.has_value())
+    {
+        if (const auto id = std::string(held->getType().getId()); id.find("shulker_box") != std::string::npos)
+            return heldSlot;
+    }
+    for (int i = 0; i < 36; ++i)
+    {
+        if (auto stack = inv.getItem(i); stack.has_value())
+        {
+            if (const auto id = std::string(stack->getType().getId()); id.find("shulker_box") != std::string::npos)
+                return i;
+        }
+    }
+    return -1;
 }
 
 ENDSTONE_PLUGIN("quick_shulkerbox", PLUGIN_VERSION, QuickShulkerboxPlugin)
@@ -55,6 +65,23 @@ void QuickShulkerboxPlugin::onPlayerInteract(const endstone::PlayerInteractEvent
 
     static std::unordered_map<std::string, std::chrono::steady_clock::time_point> lastInteract;
     const auto now = std::chrono::steady_clock::now();
+
+    // 每 60 秒清理过期条目
+    {
+        static auto lastCleanup = now;
+        if (std::chrono::duration<double>(now - lastCleanup).count() > 60.0)
+        {
+            lastCleanup = now;
+            for (auto it = lastInteract.begin(); it != lastInteract.end();)
+            {
+                if (std::chrono::duration<double>(now - it->second).count() > 60.0)
+                    it = lastInteract.erase(it);
+                else
+                    ++it;
+            }
+        }
+    }
+
     const auto playerName = event.getPlayer().getName();
     if (auto it = lastInteract.find(playerName); it != lastInteract.end())
     {
@@ -156,8 +183,10 @@ void QuickShulkerboxPlugin::onPlayerInteract(const endstone::PlayerInteractEvent
             if (auto remaining = playerInv.addItem(item1); !remaining.empty())
                 return {};
 
-            // 从玩家主手潜影盒的 NBT 中移除该物品
-            const int heldSlot = playerInv.getHeldItemSlot();
+            // 从玩家背包中查找潜影盒并移除对应物品
+            const int heldSlot = findShulkerBox(playerInv);
+            if (heldSlot < 0)
+                return {};
 
             if (auto shulkerItem = playerInv.getItem(heldSlot); shulkerItem.has_value())
             {
@@ -224,34 +253,11 @@ void QuickShulkerboxPlugin::onPlayerInteract(const endstone::PlayerInteractEvent
             // 防止嵌套：不接受潜影盒放入潜影盒
             const auto clickedId = std::string(item1.getType().getId());
             if (clickedId.find("shulker_box") != std::string::npos)
-            {
                 return {};
-            }
 
-            // 找到玩家背包中的潜影盒（优先主手）
-            int shulkerSlot = playerInv.getHeldItemSlot();
-            bool found = false;
-            if (auto held = playerInv.getItem(shulkerSlot); held.has_value())
-            {
-                if (const auto id = std::string(held->getType().getId()); id.find("shulker_box") != std::string::npos)
-                    found = true;
-            }
-            if (!found)
-            {
-                for (int i = 0; i < 36; ++i)
-                {
-                    if (auto stack = playerInv.getItem(i); stack.has_value())
-                    {
-                        if (const auto id = std::string(stack->getType().getId()); id.find("shulker_box") != std::string::npos)
-                        {
-                            shulkerSlot = i;
-                            found = true;
-                            break;
-                        }
-                    }
-                }
-            }
-            if (!found)
+            // 找到玩家背包中的潜影盒
+            const int shulkerSlot = findShulkerBox(playerInv);
+            if (shulkerSlot < 0)
                 return {};
 
             auto shulkerItem = playerInv.getItem(shulkerSlot).value();
@@ -343,6 +349,10 @@ void QuickShulkerboxPlugin::onPlayerInteract(const endstone::PlayerInteractEvent
                 newItemsList.emplace_back(e);
             }
 
+            // 防御：无实际放入量时不修改潜影盒
+            if (addedAmount <= 0)
+                return {};
+
             if (!stacked)
             {
                 // 自行构造完整 CompoundTag，包含 Bedrock 内部字段
@@ -354,7 +364,7 @@ void QuickShulkerboxPlugin::onPlayerInteract(const endstone::PlayerInteractEvent
                 entry.insert_or_assign("WasPickedUp", endstone::ByteTag(0));
                 if (const auto itemNbt = item1.getNbt(); !itemNbt.empty())
                     entry.insert_or_assign("tag", itemNbt);
-                newItemsList = listTagAppend(newItemsList, endstone::nbt::Tag(entry));
+                newItemsList.emplace_back(endstone::nbt::Tag(entry));
 
                 // 更新虚拟容器显示
                 menu->get_inventory()->set_item(targetSlot, item1);
@@ -372,6 +382,46 @@ void QuickShulkerboxPlugin::onPlayerInteract(const endstone::PlayerInteractEvent
                                   };
                                   return getSlot(a) < getSlot(b);
                               });
+
+            // 去重：同一槽位只保留最后一个条目
+            {
+                std::vector<int> lastIdx(27, -1);
+                for (int i = 0; i < static_cast<int>(newItemsList.size()); ++i)
+                {
+                    const auto &e = newItemsList[i];
+                    if (e.type() != endstone::nbt::Type::Compound) continue;
+                    const auto &c = e.get<endstone::CompoundTag>();
+                    int s = -1;
+                    if (c.contains("Slot") && c.at("Slot").type() == endstone::nbt::Type::Byte)
+                        s = c.at("Slot").get<endstone::ByteTag>().value();
+                    if (s >= 0 && s < 27)
+                        lastIdx[s] = i;
+                }
+                endstone::ListTag deduped;
+                for (int i = 0; i < static_cast<int>(newItemsList.size()); ++i)
+                {
+                    const auto &e = newItemsList[i];
+                    if (e.type() != endstone::nbt::Type::Compound)
+                    {
+                        deduped.emplace_back(e);
+                        continue;
+                    }
+                    const auto &c = e.get<endstone::CompoundTag>();
+                    int s = -1;
+                    if (c.contains("Slot") && c.at("Slot").type() == endstone::nbt::Type::Byte)
+                        s = c.at("Slot").get<endstone::ByteTag>().value();
+                    if (s >= 0 && s < 27)
+                    {
+                        if (i == lastIdx[s])
+                            deduped.emplace_back(e);
+                    }
+                    else
+                    {
+                        deduped.emplace_back(e);
+                    }
+                }
+                newItemsList = std::move(deduped);
+            }
 
             // 写回潜影盒
             nbt2.insert_or_assign("Items", newItemsList);
