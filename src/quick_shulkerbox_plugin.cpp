@@ -8,7 +8,6 @@
 #include <inventoryui_init.h>
 #include <chrono>
 #include <unordered_map>
-#include <memory>
 
 // 辅助：向 ListTag 追加元素，返回新 ListTag
 static endstone::ListTag listTagAppend(const endstone::ListTag &src, const endstone::nbt::Tag &value)
@@ -55,10 +54,6 @@ void QuickShulkerboxPlugin::onPlayerInteract(const endstone::PlayerInteractEvent
     // 冷却校验：0.5 秒内不重复触发
 
     static std::unordered_map<std::string, std::chrono::steady_clock::time_point> lastInteract;
-
-    // 持久缓存：跨菜单会话保存被取出物品的原始 NBT 条目
-    // key = "playerName:itemTypeId", value = 原始 CompoundTag
-    static std::unordered_map<std::string, endstone::CompoundTag> originalEntryCache;
     const auto now = std::chrono::steady_clock::now();
     const auto playerName = event.getPlayer().getName();
     if (auto it = lastInteract.find(playerName); it != lastInteract.end())
@@ -152,7 +147,7 @@ void QuickShulkerboxPlugin::onPlayerInteract(const endstone::PlayerInteractEvent
 
     // 注册槽位点击监听 — 拿取物品
     menu->set_listener(
-        [playerName](const endstone::Player &player, const int slot, const endstone::ItemStack &item1,
+        [](const endstone::Player &player, const int slot, const endstone::ItemStack &item1,
            inventoryui::UIInventory &inventory) -> std::function<void()> {
             if (item1.getType() == endstone::ItemType::Air)
                 return {};
@@ -188,12 +183,9 @@ void QuickShulkerboxPlugin::onPlayerInteract(const endstone::PlayerInteractEvent
                         if (comp.contains("Name") && comp.at("Name").type() == endstone::nbt::Type::String)
                             entryName = comp.at("Name").get<endstone::StringTag>().value();
 
-                        // 匹配则缓存原始条目并跳过
+                        // 匹配则跳过（从列表中移除）
                         if (entrySlot == slot && entryName == std::string(item1.getType().getId()))
-                        {
-                            originalEntryCache[playerName + ":" + entryName] = comp;
                             continue;
-                        }
 
                         newList.emplace_back(entry);
                     }
@@ -222,7 +214,7 @@ void QuickShulkerboxPlugin::onPlayerInteract(const endstone::PlayerInteractEvent
 
     // 注册玩家物品栏点击监听 — 将物品放入潜影盒
     menu->set_player_inventory_listener(
-        [menu, playerName](endstone::Player &player, int slot, const endstone::ItemStack &item1,
+        [menu](endstone::Player &player, int slot, const endstone::ItemStack &item1,
                int) -> std::function<void()> {
             if (item1.getType() == endstone::ItemType::Air)
                 return {};
@@ -353,16 +345,13 @@ void QuickShulkerboxPlugin::onPlayerInteract(const endstone::PlayerInteractEvent
 
             if (!stacked)
             {
-                // 从持久缓存中恢复原始条目的额外字段（Damage、WasPickedUp 等）
+                // 自行构造完整 CompoundTag，包含 Bedrock 内部字段
                 endstone::CompoundTag entry;
-                if (auto it = originalEntryCache.find(playerName + ":" + clickedId); it != originalEntryCache.end())
-                {
-                    entry = it->second;
-                    originalEntryCache.erase(it);
-                }
                 entry.insert_or_assign("Slot", endstone::ByteTag(static_cast<std::uint8_t>(targetSlot)));
                 entry.insert_or_assign("Name", endstone::StringTag(clickedId));
                 entry.insert_or_assign("Count", endstone::ByteTag(static_cast<std::uint8_t>(item1.getAmount())));
+                entry.insert_or_assign("Damage", endstone::ShortTag(0));
+                entry.insert_or_assign("WasPickedUp", endstone::ByteTag(0));
                 if (const auto itemNbt = item1.getNbt(); !itemNbt.empty())
                     entry.insert_or_assign("tag", itemNbt);
                 newItemsList = listTagAppend(newItemsList, endstone::nbt::Tag(entry));
