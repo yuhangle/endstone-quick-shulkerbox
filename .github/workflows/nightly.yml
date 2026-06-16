@@ -1,0 +1,133 @@
+name: Nightly Build
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: Build on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-22.04, windows-latest]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Setup Rust toolchain
+        run: rustup show
+
+      # ===== Linux =====
+      - name: Install dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget gnupg lsb-release software-properties-common unzip zip
+          wget https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 19
+          sudo apt-get install -y libc++-19-dev libc++abi-19-dev cmake ninja-build
+
+      - name: Configure CMake (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          cmake -G Ninja -B build -DCMAKE_BUILD_TYPE=Release \
+                -DCMAKE_C_COMPILER=clang-19 \
+                -DCMAKE_CXX_COMPILER=clang++-19 \
+                -DCMAKE_CXX_FLAGS="-stdlib=libc++"
+
+      # ===== Windows =====
+      - name: Set up MSVC
+        if: runner.os == 'Windows'
+        uses: TheMrMilchmann/setup-msvc-dev@v4
+        with:
+          arch: x64
+
+      - name: Set up CMake and Ninja
+        if: runner.os == 'Windows'
+        uses: lukka/get-cmake@latest
+
+      - name: Configure CMake (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          cmake -G Ninja -B build -DCMAKE_BUILD_TYPE=Release
+
+      # ===== Build =====
+      - name: Build
+        run: cmake --build build --config Release
+
+      # ===== Package =====
+      - name: Package plugin (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          mkdir -p package
+          if [ ! -f "build/endstone_quick_shulkerbox.so" ]; then
+            echo "No endstone_quick_shulkerbox.so found!"
+            exit 1
+          fi
+          cp build/endstone_quick_shulkerbox.so package/
+          cd package
+          zip -r ../quick_shulkerbox_nightly_linux.zip endstone_quick_shulkerbox.so
+
+      - name: Package plugin (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Path package -Force
+          Copy-Item build/endstone_quick_shulkerbox.dll package/
+          cd package
+          Compress-Archive -Path endstone_quick_shulkerbox.dll -DestinationPath ../quick_shulkerbox_nightly_windows.zip
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v7
+        with:
+          name: nightly-plugin-${{ runner.os }}
+          path: quick_shulkerbox_nightly_*.zip
+          retention-days: 1
+
+  # ===== Nightly Release =====
+  release:
+    name: Publish Nightly Release
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Download all artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: nightly-plugin-*
+          merge-multiple: true
+          path: artifacts
+
+      - name: List artifacts
+        run: ls -la artifacts/
+
+      - name: Create nightly release
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          DATE_TAG=$(date -u +'%Y-%m-%d')
+
+          gh release delete nightly --yes 2>/dev/null || true
+          git push --delete origin nightly 2>/dev/null || true
+
+          gh release create nightly \
+            --title "Nightly Build $DATE_TAG" \
+            --notes "Auto-built from commit ${{ github.sha }} on $DATE_TAG" \
+            --target ${{ github.sha }} \
+            --prerelease \
+            artifacts/*

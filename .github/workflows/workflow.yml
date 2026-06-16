@@ -1,0 +1,188 @@
+name: Build Quick ShulkerBox
+
+permissions:
+  contents: write
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish_release:
+        description: '是否发布 Release'
+        required: true
+        default: 'false'
+        type: choice
+        options:
+          - 'false'
+          - 'true'
+      release_type:
+        description: '发布类型'
+        required: true
+        default: 'development'
+        type: choice
+        options:
+          - 'development'
+          - 'release'
+
+jobs:
+  build:
+    name: Build on ${{ matrix.os }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        os: [ubuntu-22.04, windows-latest]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Setup Rust toolchain
+        run: rustup show
+
+      # ===== Linux =====
+      - name: Install dependencies (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wget gnupg lsb-release software-properties-common unzip zip
+          wget https://apt.llvm.org/llvm.sh
+          chmod +x llvm.sh
+          sudo ./llvm.sh 19
+          sudo apt-get install -y libc++-19-dev libc++abi-19-dev cmake ninja-build
+
+      - name: Configure CMake (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          if [ "${{ github.event.inputs.release_type }}" = "release" ]; then
+            cmake -G Ninja -B build -DCMAKE_BUILD_TYPE=Release -DRELEASE_VERSION=1 \
+                  -DCMAKE_C_COMPILER=clang-19 \
+                  -DCMAKE_CXX_COMPILER=clang++-19 \
+                  -DCMAKE_CXX_FLAGS="-stdlib=libc++"
+          else
+            cmake -G Ninja -B build -DCMAKE_BUILD_TYPE=Release \
+                  -DCMAKE_C_COMPILER=clang-19 \
+                  -DCMAKE_CXX_COMPILER=clang++-19 \
+                  -DCMAKE_CXX_FLAGS="-stdlib=libc++"
+          fi
+
+      # ===== Windows =====
+      - name: Set up MSVC
+        if: runner.os == 'Windows'
+        uses: TheMrMilchmann/setup-msvc-dev@v4
+        with:
+          arch: x64
+
+      - name: Set up CMake and Ninja
+        if: runner.os == 'Windows'
+        uses: lukka/get-cmake@latest
+
+      - name: Configure CMake (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if ("${{ github.event.inputs.release_type }}" -eq "release") {
+            cmake -G Ninja -B build -DCMAKE_BUILD_TYPE=Release -DRELEASE_VERSION=1
+          } else {
+            cmake -G Ninja -B build -DCMAKE_BUILD_TYPE=Release
+          }
+
+      # ===== Build =====
+      - name: Build
+        run: cmake --build build --config Release
+
+      # ===== Upload plugin artifact =====
+      - name: Upload plugin artifact (Linux)
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v7
+        with:
+          name: shulkerbox-linux-plugin
+          path: build/endstone_quick_shulkerbox.so
+
+      - name: Upload plugin artifact (Windows)
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@v7
+        with:
+          name: shulkerbox-windows-plugin
+          path: ${{ github.workspace }}\build\endstone_quick_shulkerbox.dll
+
+  release:
+    name: Publish Release
+    needs: build
+    if: ${{ github.event.inputs.publish_release == 'true' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v6
+        with:
+          fetch-depth: 0
+
+      - name: Extract version information
+        id: get_version
+        run: |
+          FILE_BASE_VERSION=$(grep -o 'set(BASE_VERSION "[^"]*")' CMakeLists.txt | cut -d'"' -f2)
+
+          if [ "${{ github.event.inputs.release_type }}" = "release" ]; then
+            PROJECT_VERSION="${FILE_BASE_VERSION}"
+            TAG_VERSION="v${FILE_BASE_VERSION}"
+            RELEASE_TITLE="Release v${FILE_BASE_VERSION}"
+          else
+            LAST_STABLE_TAG=$(git describe --tags --match="v[0-9]*" --exclude="*-*" --abbrev=0 2>/dev/null || echo "")
+
+            if [ -n "$LAST_STABLE_TAG" ]; then
+              GIT_COMMIT_COUNT=$(git rev-list --count "${LAST_STABLE_TAG}..HEAD")
+            else
+              GIT_COMMIT_COUNT=$(git rev-list --count HEAD)
+            fi
+
+            GIT_SHORT_HASH=$(git rev-parse --short HEAD)
+
+            PROJECT_VERSION="${FILE_BASE_VERSION}-alpha.${GIT_COMMIT_COUNT}+${GIT_SHORT_HASH}"
+            TAG_VERSION="v${FILE_BASE_VERSION}-alpha.${GIT_COMMIT_COUNT}"
+            RELEASE_TITLE="Development Build ${PROJECT_VERSION}"
+          fi
+
+          echo "VERSION=${PROJECT_VERSION}" >> $GITHUB_OUTPUT
+          echo "TAG_VERSION=${TAG_VERSION}" >> $GITHUB_OUTPUT
+          echo "RELEASE_TITLE=${RELEASE_TITLE}" >> $GITHUB_OUTPUT
+
+      - name: Download all plugin artifacts
+        uses: actions/download-artifact@v8
+        with:
+          pattern: shulkerbox-*-plugin
+          merge-multiple: false
+          path: artifacts
+
+      - name: Prepare and Package All
+        run: |
+          VERSION=${{ steps.get_version.outputs.VERSION }}
+          OS_LIST=(linux windows)
+          for OS in "${OS_LIST[@]}"; do
+            if [[ "$OS" == "linux" ]]; then
+              PLUGIN_PATH=$(find artifacts/shulkerbox-linux-plugin -name "endstone_quick_shulkerbox.so" | head -n 1)
+              EXT=so
+            else
+              PLUGIN_PATH=$(find artifacts/shulkerbox-windows-plugin -name "endstone_quick_shulkerbox.dll" | head -n 1)
+              EXT=dll
+            fi
+            BUILD_DIR=package
+            mkdir -p ${BUILD_DIR}
+            cp "$PLUGIN_PATH" ${BUILD_DIR}/endstone_quick_shulkerbox.${EXT}
+            ZIP_NAME=quick_shulkerbox_v${VERSION}_${OS}.zip
+            cd ${BUILD_DIR}
+            zip -r ../${ZIP_NAME} endstone_quick_shulkerbox.${EXT}
+            cd ..
+            mv ${ZIP_NAME} artifacts/
+            rm -rf ${BUILD_DIR}
+          done
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.get_version.outputs.TAG_VERSION }}
+          name: ${{ steps.get_version.outputs.RELEASE_TITLE }}
+          draft: false
+          prerelease: ${{ github.event.inputs.release_type == 'development' }}
+          files: artifacts/*.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
