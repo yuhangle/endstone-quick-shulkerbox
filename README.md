@@ -1,6 +1,6 @@
 ![header](https://capsule-render.vercel.app/api?type=waving&height=300&color=gradient&text=Quick%20ShulkerBox)
 
-[![中文](https://img.shields.io/badge/中文-README_chs.md-blue)](README_chs.md)
+[![中文](https://img.shields.io/badge/中文-README.chs.md-blue)](README.chs.md)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](LICENSE)
 ![Build Status](https://github.com/yuhangle/endstone-quick-shulkerbox/actions/workflows/workflow.yml/badge.svg)
 
