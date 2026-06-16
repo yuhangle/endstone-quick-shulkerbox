@@ -8,6 +8,34 @@
 #include <inventoryui_init.h>
 #include <chrono>
 #include <unordered_map>
+#include <unordered_set>
+
+// 不允许通过快速潜影盒操作的物品黑名单（关键词匹配变种）
+// bundle: 收纳袋（内含物品 NBT 会丢失）
+// potion: 药水（效果数据不在 ItemStack NBT 中）
+// ominous_bottle: 不详之瓶（同理）
+static constexpr std::string_view kBlacklistedItems[] = {
+    "bundle",
+    "potion",
+    "ominous_bottle",
+};
+
+//储存翻译语句
+namespace trans
+{
+    std::string ps = "[QuickShulkerBox] ";
+    std::string ps_chs = "[快速潜影盒] ";
+    std::string chs = "为了保护你的数据，部分物品不能被操作";
+    std::string eng = "To protect your data,some items cannot be stored or retrieved.";
+
+}
+
+static bool isBlacklisted(const std::string &typeId)
+{
+    return std::ranges::any_of(kBlacklistedItems, [&typeId](std::string_view keyword) {
+        return typeId.find(keyword) != std::string::npos;
+    });
+}
 
 // 辅助：比较两个 CompoundTag 是否内容相等
 static bool compoundTagEqual(const endstone::CompoundTag &a, const endstone::CompoundTag &b)
@@ -101,16 +129,13 @@ void QuickShulkerboxPlugin::onPlayerInteract(const endstone::PlayerInteractEvent
         }
     }
 
-    if (!nbt.contains("Items") || nbt.at("Items").type() != endstone::nbt::Type::List)
-        return;
-
-    const auto &items_list = nbt.at("Items").get<endstone::ListTag>();
-    if (items_list.empty())
-        return;
+    endstone::ListTag items_list;
+    if (nbt.contains("Items") && nbt.at("Items").type() == endstone::nbt::Type::List)
+        items_list = nbt.at("Items").get<endstone::ListTag>();
 
     auto& server_ = event.getPlayer().getServer();
 
-    std::string menu_title = server_.getLanguage().translate(item.getType().getTranslationKey());
+    std::string menu_title = server_.getLanguage().translate(item.getType().getTranslationKey(), event.getPlayer().getLocale());
 
     if (auto meta = item.getItemMeta())
     {
@@ -164,12 +189,22 @@ void QuickShulkerboxPlugin::onPlayerInteract(const endstone::PlayerInteractEvent
             inv->set_item(slot, stack);
     }
 
+    // 黑名单物品点击标记（共享给两个 listener 和关闭回调）
+    auto blacklistedClickers = std::make_shared<std::unordered_set<std::string>>();
+
     // 注册槽位点击监听 — 拿取物品
     menu->set_listener(
-        [capturedShulkerSlot](const endstone::Player &player, const int slot, const endstone::ItemStack &item1,
+        [capturedShulkerSlot, blacklistedClickers](const endstone::Player &player, const int slot, const endstone::ItemStack &item1,
            inventoryui::UIInventory &inventory) -> std::function<void()> {
             if (item1.getType() == endstone::ItemType::Air)
                 return {};
+
+            // 黑名单物品不允许取出
+            if (isBlacklisted(std::string(item1.getType().getId())))
+            {
+                blacklistedClickers->insert(player.getName());
+                return {};
+            }
 
             auto &playerInv = player.getInventory();
             if (auto remaining = playerInv.addItem(item1); !remaining.empty())
@@ -267,15 +302,23 @@ void QuickShulkerboxPlugin::onPlayerInteract(const endstone::PlayerInteractEvent
 
     // 注册玩家物品栏点击监听 — 将物品放入潜影盒
     menu->set_player_inventory_listener(
-        [menu, capturedShulkerSlot](endstone::Player &player, int slot, const endstone::ItemStack &item1,
+        [menu, capturedShulkerSlot, blacklistedClickers](endstone::Player &player, int slot, const endstone::ItemStack &item1,
                int) -> std::function<void()> {
             if (item1.getType() == endstone::ItemType::Air)
                 return {};
 
             auto &playerInv = player.getInventory();
 
-            // 防止嵌套：不接受潜影盒放入潜影盒
             const auto clickedId = std::string(item1.getType().getId());
+
+            // 黑名单物品不允许存入
+            if (isBlacklisted(clickedId))
+            {
+                blacklistedClickers->insert(player.getName());
+                return {};
+            }
+
+            // 防止嵌套：不接受潜影盒放入潜影盒
             if (clickedId.find("shulker_box") != std::string::npos)
                 return {};
 
@@ -511,6 +554,21 @@ void QuickShulkerboxPlugin::onPlayerInteract(const endstone::PlayerInteractEvent
 
             return {};
         });
+
+    // 关闭 UI 时，提示点击过黑名单物品的玩家
+    menu->set_close_listener([blacklistedClickers](const endstone::Player &player) {
+        if (blacklistedClickers->contains(player.getName()))
+        {
+            if (player.getLocale() == "zh_CN")
+            {
+                player.sendErrorMessage(trans::ps_chs + trans::chs);
+            } else
+            {
+                player.sendErrorMessage(trans::ps + trans::eng);
+            }
+            blacklistedClickers->erase(player.getName());
+        }
+    });
 
     menu->send_to(event.getPlayer());
 }
